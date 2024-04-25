@@ -221,7 +221,9 @@ func sync_file(file string) {
 	for ID, PATH := range sync_paths {
 		i = i + 1
 		fmt.Printf("Location (%d / %d):  %s \n", i, len_s, ID)
-		new_name := filepath.Clean(PATH) + "/" + file
+		new_name := fmt.Sprintf(
+			"%s/%s", filepath.Clean(PATH), filepath.Base(file),
+		)
 		copy_file(file, new_name)
 		verify_copy(file, new_name)
 	}
