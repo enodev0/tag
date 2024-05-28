@@ -40,8 +40,8 @@ func get_working_dir() string {
 var HOME string = get_home_dir()
 var WDIR string = get_working_dir()
 var SYNC bool = true
-var CONF_PATH string = HOME + "/.tag/config"
-var SYNC_PATH string = HOME + "/.tag/sync"
+var CONF_PATH string = filepath.Join(HOME, ".tag/config")
+var SYNC_PATH string = filepath.Join(HOME, ".tag/sync")
 
 type archive struct {
 	dst *zip.Writer
@@ -81,6 +81,10 @@ func archive_folder(path, name string) bool {
 	return (true)
 }
 
+/* Let's stick to SHA256. Making the algorithm selectable
+ * will lead to additional complexity in verify_file()
+ * as we can't figure out the hash algorithm just by
+ * looking at the digest string */
 func file_digest(f string) string {
 
 	sha2 := sha256.New()
@@ -142,6 +146,20 @@ func hash_rename_in_place(name, digest string) string {
 	return (new_name) /* for sync */
 }
 
+/* Keeping things as simple as possible */
+func verify_file(file string) bool {
+
+	ok := true
+	new_hash := file_digest(file)
+	old_hash := strings.Split(filepath.Base(file), "_")[0]
+
+	if new_hash != old_hash {
+		ok = false
+	}
+
+	return (ok)
+}
+
 func verify_copy(original, copied string) {
 
 	orig_sha2 := file_digest(original)
@@ -188,7 +206,8 @@ func parse_configs(path, delim string) (map[string]string, bool) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		line = strings.ReplaceAll(line, " ", "")
-		if strings.Contains(line, "#") {
+
+		if strings.HasPrefix(line, "#") || line == "" {
 			continue /* comment line */
 		}
 		chunks := strings.Split(line, delim)
@@ -201,6 +220,103 @@ func parse_configs(path, delim string) (map[string]string, bool) {
 	return conf, ok
 }
 
+/* make sure all synced locations have the same elements */
+func run_sync_balance() {
+
+	// /* file -> [location 1, location 2 ..] */
+	// elements := make(map[string][]string)
+
+	// sync_paths, ok := parse_configs(SYNC_PATH, ",")
+
+	// if !ok {
+	// 	println("E: Parse error: ", SYNC_PATH)
+	// 	SYNC = false /* consider removing this? see below */
+	// 	return
+	// }
+
+}
+
+/* Fetch file with a certain pattern in its name from
+ * a specific sync location into the current working
+ * directory */
+func fetch_file(pattern, loc string) {
+
+	sync_paths, ok := parse_configs(SYNC_PATH, ",")
+
+	if !ok {
+		println("E: Parse error: ", SYNC_PATH)
+		SYNC = false /* consider removing this? see below */
+		return
+	}
+
+	PATH, ok := sync_paths[loc]
+	if !ok {
+		println("E: Not a valid location: ", loc)
+		return
+	}
+
+	files, err := os.ReadDir(PATH)
+	if err != nil {
+		println("E: Not accessible: ", PATH)
+		return
+	}
+
+	/* copy over all files which match a pattern,
+	 * verify the signature both before and after
+	 * copy */
+	for _, file := range files {
+		//
+		if strings.Contains(file.Name(), pattern) {
+			from := filepath.Join(PATH, file.Name())
+			to := filepath.Join(WDIR, file.Name())
+
+			if !verify_file(from) {
+				println(
+					"E: Checksum mismatch. Please choose a different source.",
+				)
+				return
+			}
+			copy_file(from, to)
+			verify_copy(from, to)
+			println("> ", filepath.Base(to))
+		}
+	}
+}
+
+/* Check if a file with a certain pattern in the file name
+ * exists in any synced location */
+func seek_file(pattern string) {
+
+	sync_paths, ok := parse_configs(SYNC_PATH, ",")
+	var i int = 0
+
+	if !ok {
+		println("E: Parse error: ", SYNC_PATH)
+		SYNC = false /* consider removing this? see below */
+		return
+	}
+
+	for ID, PATH := range sync_paths {
+		println("Checking location: ", ID)
+		println("Path:\t", PATH)
+		files, err := os.ReadDir(PATH)
+
+		/* filepath.Glob() won't do this for us */
+		if err != nil {
+			println("E: Not accessible: ", ID)
+			continue
+		}
+		for _, file := range files {
+			if strings.Contains(file.Name(), pattern) {
+				i++
+				fmt.Printf("[%d]> %s\n", i, file.Name())
+			}
+		}
+		println()
+		i = 0
+	}
+}
+
 func sync_file(file string) {
 
 	if !SYNC {
@@ -211,7 +327,9 @@ func sync_file(file string) {
 
 	if !ok {
 		println("E: Parse error: ", SYNC_PATH)
-		SYNC = false
+		/* this function runs once, do we really need
+		 * this here? */
+		SYNC = false /* consider removing this */
 		return
 	}
 	i := 0
@@ -219,10 +337,10 @@ func sync_file(file string) {
 
 	println("\nSyncing, please wait ...")
 	for ID, PATH := range sync_paths {
-		i = i + 1
+		i++
 		fmt.Printf("Location (%d / %d):  %s \n", i, len_s, ID)
-		new_name := fmt.Sprintf(
-			"%s/%s", filepath.Clean(PATH), filepath.Base(file),
+		new_name := filepath.Join(
+			filepath.Clean(PATH), filepath.Base(file),
 		)
 		copy_file(file, new_name)
 		verify_copy(file, new_name)
@@ -231,11 +349,11 @@ func sync_file(file string) {
 
 func main() {
 	//
-	blurb := "\nUsage: tag file/file-inplace/folder <filename/foldername>\n\n"
+	blurb := "\nInvalid command line.\n"
 
 	if runtime.GOOS == "windows" {
 		println("E: Platform not supported")
-		os.Exit(0)
+		os.Exit(-1)
 	}
 
 	/* if we can't find $HOME, we won't be reading the config
@@ -245,6 +363,7 @@ func main() {
 		SYNC = false
 	}
 
+	/* maybe move the config initialization out of main() */
 	conf, ok := parse_configs(CONF_PATH, "=")
 
 	if !ok {
@@ -263,7 +382,8 @@ func main() {
 		}
 	}
 
-	if len(os.Args) != 3 {
+	/* FUNKY: make sure #args is either 3 or 4*/
+	if len(os.Args) < 3 || len(os.Args) > 4 {
 		println(blurb)
 		os.Exit(-1)
 	}
@@ -291,8 +411,25 @@ func main() {
 		hash := file_digest(target)
 		return (hash_rename_in_place(target, hash))
 	}
-
+	println() /* cosmetics */
 	switch mode {
+	case "balance":
+		run_sync_balance()
+	case "verify":
+		ok := verify_file(target)
+		if ok {
+			println("File is OK")
+		} else {
+			println("E: Checksum mismatch")
+		}
+	case "fetch":
+		if len(os.Args) != 4 {
+			println("Use: tag fetch <pattern> <location name>")
+		} else {
+			fetch_file(target, os.Args[3])
+		}
+	case "seek":
+		seek_file(target)
 	case "folder":
 		out := handle_folders(target)
 		sync_file(out)
@@ -312,5 +449,5 @@ func main() {
 		println(blurb)
 	}
 
-	println("Done")
+	println("\nDone")
 }
